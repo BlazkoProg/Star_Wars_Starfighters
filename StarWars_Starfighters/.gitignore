@@ -1,0 +1,19 @@
+# Ignoruj pliki tymczasowe i binarne Visual Studio
+x64/
+*.obj
+*.pdb
+*.log
+*.tlog
+*.recipe
+*.iobj
+*.ipdb
+*.ilk
+*.exe
+
+# Ignoruj ukryty folder konfiguracyjny VS
+.vs/
+
+# Zostaw pliki projektu (muszą być na GitHubie, żeby dało się go otworzyć na innym PC)
+!*.vcxproj
+!*.vcxproj.filters
+!*.vcxproj.user
