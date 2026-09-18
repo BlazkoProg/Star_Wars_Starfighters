@@ -5,6 +5,9 @@
 #include <cmath>
 #include <vector>
 
+#define RLIGHTS_IMPLEMENTATION
+#include "rlights.h"
+
 using namespace std;
 
 struct Vec3 {
@@ -412,6 +415,7 @@ int main() {
     Model Death_Star;
     Model Destroyer;
     Model Tatooine;
+    Model Sun;
 
     Font OrbitronFont;
     Font JediFont;
@@ -422,6 +426,8 @@ int main() {
     Music music01;
 
     Texture2D introBG;
+
+    Shader lightingShader;
 
     const int MAX_CHANNELS = 4;
     Sound laserChannels[MAX_CHANNELS];
@@ -454,6 +460,13 @@ int main() {
         else if (type == 0) stars[i].color = Color{ 205, (unsigned char)brightness, 205, 205 };
         else                stars[i].color = Color{ (unsigned char)brightness, (unsigned char)brightness, (unsigned char)brightness, 205 };
     }
+    Image starImg = GenImageGradientRadial(16, 16, 0.0f, WHITE, BLACK);
+    Texture2D starTexture = LoadTextureFromImage(starImg);
+    UnloadImage(starImg);
+
+    Image glowImg = GenImageGradientRadial(256, 256, 0.0f, WHITE, BLANK);
+    Texture2D sunGlowTexture = LoadTextureFromImage(glowImg);
+    UnloadImage(glowImg);
 
     vector<shot> shots;
     vector<Bot> bots;
@@ -487,6 +500,7 @@ int main() {
     bool assetsLoaded = false;
     RenderTexture2D menuTarget = LoadRenderTexture(screenSize.x, screenSize.y);
     bool out = false;
+    Light light;
 
     while (!WindowShouldClose()) {
         if (GameState >= 0 && GameState <= 3 && step > 1) {
@@ -508,9 +522,26 @@ int main() {
             TIE =               LoadModel("resources/models/tie_fighter.glb");
             ExplosionModel =    LoadModel("resources/models/TIE_explosion.glb");
 
-            Death_Star = LoadModel("resources/models/death_star.glb");
-            Destroyer =  LoadModel("resources/models/destroyer.glb");
-            Tatooine =   LoadModel("resources/models/tatooine.glb");
+            Death_Star =    LoadModel("resources/models/death_star.glb");
+            Destroyer =     LoadModel("resources/models/destroyer.glb");
+            Tatooine =      LoadModel("resources/models/tatooine.glb");
+            Sun =           LoadModel("resources/models/sun.glb");
+
+            lightingShader = LoadShader("resources/shaders/lighting.vs", "resources/shaders/lighting.fs");
+
+            lightingShader.locs[SHADER_LOC_VECTOR_VIEW] = GetShaderLocation(lightingShader, "viewPos");
+
+            light = CreateLight(LIGHT_DIRECTIONAL, Vector3{ 10000.0f, 0.0f, 0.0f }, Vector3Zero(), WHITE, lightingShader);
+
+            int ambientLoc = GetShaderLocation(lightingShader, "ambient");
+            float ambientColor[4] = { 0.15f, 0.15f, 0.2f, 1.0f };
+            SetShaderValue(lightingShader, ambientLoc, ambientColor, SHADER_UNIFORM_VEC4);
+
+            for (int i = 0; i < xWing.materialCount; i++) xWing.materials[i].shader = lightingShader;
+            for (int i = 0; i < xWingFPV.materialCount; i++) xWingFPV.materials[i].shader = lightingShader;
+            for (int i = 0; i < TIE.materialCount; i++) TIE.materials[i].shader = lightingShader;
+            for (int i = 0; i < Destroyer.materialCount; i++) Destroyer.materials[i].shader = lightingShader;
+            for (int i = 0; i < Tatooine.materialCount; i++) Tatooine.materials[i].shader = lightingShader;
 
             OrbitronFont = LoadFontEx("resources/fonts/Orbitron/static/Orbitron-Bold.ttf", 400, NULL, 0);
             JediFont = LoadFontEx("resources/fonts/star_jedi/stjedise/STJEDISE.TTF", 400, NULL, 0);
@@ -543,11 +574,16 @@ int main() {
             ModelOffset(xWing, 0);
             ModelOffset(xWingFPV, 1);
             ModelOffset(TIE, 0);
+            ModelOffset(Sun, 0);
 
-            // 3. Przełączamy stan od razu na 2 (rozgrywka)
             GameState = 1;
         }
         else if (GameState == 1) {
+            if (IsKeyPressed(KEY_TAB)) {
+                GameState = 4;
+                StopMusicStream(musicIntro);
+                PlayMusicStream(music01);
+            }
             BeginTextureMode(menuTarget);
             ClearBackground(BLANK);
 
@@ -735,6 +771,8 @@ int main() {
                 if (camState > 1) camState--;
                 else camState = 3;
             }
+
+            if (ToR >= 0.0f) ToR -= dt;
             if (IsKeyPressed(KEY_R) && ToR <= 0.0f) {
                 magazine += 300;
                 ToR = 3.0f;
@@ -766,22 +804,51 @@ int main() {
             rotationAngle *= RAD2DEG;
 
             CameraUpdate(player, camState, camera);
+            float cameraPos[3] = { camera.position.x, camera.position.y, camera.position.z };
+            SetShaderValue(lightingShader, lightingShader.locs[SHADER_LOC_VECTOR_VIEW], cameraPos, SHADER_UNIFORM_VEC3);
+
+            UpdateLightValues(lightingShader, light);
 
             BeginDrawing();
             ClearBackground(Color{ 5, 5, 15, 255 });
 
-            rlSetClipPlanes(0.001f, 1000000.0f);
+            rlSetClipPlanes(0.01f, 1000000.0f);
             BeginMode3D(camera);
 
+            EndShaderMode();
             for (int i = 0; i < StarsCount; i++) {
-                Vector3 starPos = Vector3Add(player.pos, Vector3Scale(stars[i].direction, 600.0f));
-                DrawSphere(starPos, 1, stars[i].color);
+                Vector3 starPos = Vector3Add(player.pos, Vector3Scale(stars[i].direction, 20000.0f));
+                Rectangle sourceRec = { 0.0f, 0.0f, (float)starTexture.width, (float)starTexture.height };
+                Vector2 size = { 120.0f, 120.0f };
+
+                DrawBillboardPro(camera, starTexture, sourceRec, starPos, camera.up, size, { size.x / 2, size.y / 2 }, 0.0f, stars[i].color);
             }
+            BeginShaderMode(lightingShader);
+
             DrawModelEx(Tatooine, { 0.0, 0.0, 7500 }, { 0.0f, 0.0f, 0.0f }, 0.0, { 5000.0, 5000.0, 5000.0 }, WHITE);
             DrawModelEx(Destroyer, { 0.0, 3000.0, 0.0 }, { 0.0f, 0.0f, 0.0f }, 0.0, { 0.5, 0.5, 0.5 }, WHITE);
             DrawModelEx(Destroyer, { 500.0, 3000.0, 200.0 }, { 0.0f, 0.0f, 0.0f }, 0.0, { 0.5, 0.5, 0.5 }, WHITE);
             DrawModelEx(Destroyer, { 1300.0, 3000.0, 0.0 }, { 0.0f, 0.0f, 0.0f }, 0.0, { 0.5, 0.5, 0.5 }, WHITE);
             DrawModelEx(Destroyer, { -800.0, 3000.0, -300.0 }, { 0.0f, 0.0f, 0.0f }, 0.0, { 0.5, 0.5, 0.5 }, WHITE);
+
+            EndShaderMode();
+            DrawModelEx(Sun, { 10000.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, 0.0f }, 0.0, { 3, 3, 3 }, WHITE);
+            BeginBlendMode(BLEND_ADDITIVE);
+            rlDisableDepthTest();
+            rlDisableDepthMask();
+            Vector3 toCamera = Vector3Normalize(Vector3Subtract(camera.position, {9000.0f, 0.0f, 0.0f }));
+            Vector3 right = Vector3Normalize(Vector3CrossProduct(camera.up, toCamera));
+            Vector3 up = Vector3CrossProduct(toCamera, right);
+            Rectangle sourceRec = { 0.0f, 0.0f, (float)sunGlowTexture.width, (float)sunGlowTexture.height };
+            Vector2 size = { 16000.0f, 16000.0f };
+
+            DrawBillboardPro(camera, sunGlowTexture, sourceRec, {9000.0f, 0.0f, 0.0f }, up, size, {size.x / 2.0f, size.y / 2.0f}, 0.0f, WHITE);
+
+            rlEnableDepthMask();
+            rlEnableDepthTest();
+            EndBlendMode();
+
+            BeginShaderMode(lightingShader);
 
             UpdateExplosions(explosions, step, ExplosionModel);
             DrawEnemies(bots, TIE, scale);
@@ -799,7 +866,9 @@ int main() {
             //DrawText("Sterowanie: W/S (Pitch) | A/D (Roll) | Q/E (Yaw)", 10, 40, 20, LIGHTGRAY);
             //DrawText(TextFormat("Rotation: X: %.1f, Y: %.1f, Z: %.1f", player.orientation.x, player.orientation.y, player.orientation.z), 10, 70, 20, WHITE);
             DrawText(TextFormat("Enemies left: %.1f", (float)bots.size()), 10, 70, 20, WHITE);
+            EndShaderMode();
             if (camState != 2) Targeting(screenSize);
+            BeginShaderMode(lightingShader);
 
             EndDrawing();
             step++;
@@ -816,6 +885,8 @@ int main() {
     UnloadModel(Death_Star);
     UnloadModel(ExplosionModel);
     UnloadRenderTexture(menuTarget);
+    UnloadShader(lightingShader);
+    UnloadTexture(starTexture);
     if (isAudioReady) {
         UnloadSound(laserSound);
         UnloadSound(baseLaser);
