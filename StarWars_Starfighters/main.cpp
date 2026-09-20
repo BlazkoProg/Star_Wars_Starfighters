@@ -24,6 +24,7 @@ struct Player {
     Vector3 pos;
     Quaternion orientation;
     Vector3 targetOrientation;
+    float HP;
 };
 
 struct Star {
@@ -31,9 +32,15 @@ struct Star {
     Color color;
 };
 
+enum ShotTeam {
+    shot_p, // player
+    shot_a, // ally
+    shot_e  // enemy
+};
 struct shot {
     Quaternion direction;
     Vector3 pos;
+    ShotTeam team;
 };
 
 struct Bot {
@@ -43,6 +50,7 @@ struct Bot {
     bool alive;
     float radius;
     int HP;
+    int targetID;
 };
 
 struct Explosion {
@@ -108,7 +116,7 @@ Quaternion RotateToTarget(Quaternion current, Quaternion target, float pitchSpee
     return current;
 }
 
-int targetLockingPlayer(Player player, vector<Bot> bots) {
+int targetLockingAlliesPlayer(Player player, vector<Bot> bots) {
     Vector3 forward = { 0.0f, 0.0f, 1.0f };
     forward = Vector3RotateByQuaternion(forward, player.orientation);
 
@@ -129,6 +137,43 @@ int targetLockingPlayer(Player player, vector<Bot> bots) {
     return targetID;
 }
 
+const int TARGET_NONE = -1;
+const int TARGET_PLAYER = -2;
+const float MIN_LOCK_DISTANCE = 20.0f; // nie lockuj na cele bliższe niż to
+const float TARGET_STOP_DISTANCE = 8.0f;  // zatrzymaj/zredukuj napęd gdy bardzo blisko celu
+const float SEPARATION_RANGE = 100.0f; // zasięg unikania sąsiadów
+const float SEPARATION_STRENGTH = 20.0f; // siła separacji
+const float SEPARATION_WEIGHT = 0.25f;  // waga separacji względem dążenia do celu
+
+const float ENEMY_ROT_SPEED = 0.5f; // mniejsza zwrotność enemy
+const float ALLY_ROT_SPEED = 0.5f; // jeszcze mniejsza zwrotność allies
+const float MODEL_CORRECTION_Y_ANGLE = PI; // 180° korekcja wokół Y dla modeli które "patrzą w tył"
+
+int PickTargetForEnemy(const Bot& enemy, const Player& player, const vector<Bot>& allies) {
+    int bestId = TARGET_NONE;
+    float bestDist = 1e30f;
+
+    // Rozważ gracza tylko jeśli dalej niż MIN_LOCK_DISTANCE
+    float dPlayer = Vector3Distance(enemy.pos, player.pos);
+    if (dPlayer >= MIN_LOCK_DISTANCE) {
+        bestId = TARGET_PLAYER;
+        bestDist = dPlayer;
+    }
+
+    // Rozważ allies (tylko te dalej niż MIN_LOCK_DISTANCE)
+    for (int i = 0; i < (int)allies.size(); ++i) {
+        if (!allies[i].alive) continue;
+        float d = Vector3Distance(enemy.pos, allies[i].pos);
+        if (d < MIN_LOCK_DISTANCE) continue; // ignoruj zbyt bliskie cele
+        if (d < bestDist) {
+            bestDist = d;
+            bestId = i;
+        }
+    }
+
+    return bestId;
+}
+
 Quaternion QuaternionToTarget(Player& player, Vector3 targetPos) {
     Vector3 forward = { 0.0f, 0.0f, 1.0f };
     Vector3 direction = Vector3Subtract(targetPos, player.pos);
@@ -136,7 +181,7 @@ Quaternion QuaternionToTarget(Player& player, Vector3 targetPos) {
     return QuaternionFromVector3ToVector3(forward, direction);
 }
 
-void UpdateFlight(Player& player, float vel) {
+void UpdateFlight(Player& player, float vel, vector<shot> shots, float radius) {
     Vector3 localPitchAxis = {1.0f, 0.0f, 0.0f};
     Vector3 localYawAxis = { 0.0f, 1.0f, 0.0f };
     Vector3 localRollAxis = { 0.0f, 0.0f, 1.0f };
@@ -158,6 +203,14 @@ void UpdateFlight(Player& player, float vel) {
     forward = Vector3RotateByQuaternion(forward, player.orientation);
     float dt = GetFrameTime();
     player.pos = Vector3Add(player.pos, Vector3Scale(forward, vel * dt));
+
+    for (int j = 0; j < (int)shots.size(); j++) {
+        if (shots[j].team == shot_p) continue;
+        float dist = Vector3Distance(shots[j].pos, player.pos);
+        if (dist < radius) {
+            player.HP -= 200;
+        }
+    }
 }
 
 void Targeting(Vector2 screenSize) {
@@ -235,17 +288,26 @@ void UpdateShots(vector<shot>& shots, float ShotVel) {
         if (abs(shots[i].pos.x) > 1000.0 || abs(shots[i].pos.y) > 1000.0 || abs(shots[i].pos.z) > 1000.0) shots.erase(shots.begin() + i);
     }
 }
-void DrawShots(const vector<shot>& shots) {
+void DrawShots(const vector<shot>& shots, Player player) {
     for (size_t i = 0; i < shots.size(); i++) {
-        if (Vector3Length(shots[i].pos) > 300.0f) continue;
+        if (Vector3Length(Vector3Subtract(shots[i].pos, player.pos)) > 500.0f) continue;
         Vector3 forward = { 0.0f, 0.0f, 1.0f };
         forward = Vector3RotateByQuaternion(forward, shots[i].direction);
         Vector3 startPos = shots[i].pos;
         Vector3 endPos = Vector3Add(startPos, Vector3Scale(forward, 16.0f));
-        DrawLine3D(startPos, endPos, RED);
+        Color color = WHITE;
+        if (Vector3Length(Vector3Subtract(shots[i].pos, player.pos)) > 20.0f) {
+            if (shots[i].team == shot_p)
+                color = GREEN;
+            else if (shots[i].team == shot_a)
+                color = BLUE;
+            else if (shots[i].team == shot_e)
+                color = RED;
+            DrawCapsule(startPos, endPos, 3.0f, 10, 1, color);
+        }
     }
 }
-void Shot(vector<shot>& shots, Player player) {
+void Shot(vector<shot>& shots, Vector3 pos, Quaternion orientation, ShotTeam team) {
     float wingX = 2.7f;  // Szerokość skrzydeł (rozpiętość w bok)
     float wingY = 2.0f;  // Wysokość skrzydeł (góra/dół od kadłuba)
     float gunZ = -8.0f;  // Wysunięcie luf działek przed środek ciężkości statku
@@ -253,75 +315,407 @@ void Shot(vector<shot>& shots, Player player) {
     Vector3 rightUpperLoc = { wingX,  0.0, gunZ };
     Vector3 leftLowerLoc = { -wingX, -wingY, gunZ };
     Vector3 rightLowerLoc = { wingX, -wingY, gunZ };
-    leftUpperLoc = Vector3RotateByQuaternion(leftUpperLoc, player.orientation);
-    rightUpperLoc = Vector3RotateByQuaternion(rightUpperLoc, player.orientation);
-    leftLowerLoc = Vector3RotateByQuaternion(leftLowerLoc, player.orientation);
-    rightLowerLoc = Vector3RotateByQuaternion(rightLowerLoc, player.orientation);
-    Vector3 t1_pos = Vector3Add(player.pos, leftUpperLoc);
-    Vector3 t2_pos = Vector3Add(player.pos, rightUpperLoc);
-    Vector3 t3_pos = Vector3Add(player.pos, leftLowerLoc);
-    Vector3 t4_pos = Vector3Add(player.pos, rightLowerLoc);
-    shot t1 = { player.orientation, t1_pos };
-    shot t2 = { player.orientation, t2_pos };
-    shot t3 = { player.orientation, t3_pos };
-    shot t4 = { player.orientation, t4_pos };
+    leftUpperLoc = Vector3RotateByQuaternion(leftUpperLoc, orientation);
+    rightUpperLoc = Vector3RotateByQuaternion(rightUpperLoc, orientation);
+    leftLowerLoc = Vector3RotateByQuaternion(leftLowerLoc, orientation);
+    rightLowerLoc = Vector3RotateByQuaternion(rightLowerLoc, orientation);
+    Vector3 t1_pos = Vector3Add(pos, leftUpperLoc);
+    Vector3 t2_pos = Vector3Add(pos, rightUpperLoc);
+    Vector3 t3_pos = Vector3Add(pos, leftLowerLoc);
+    Vector3 t4_pos = Vector3Add(pos, rightLowerLoc);
+    shot t1 = { orientation, t1_pos, team };
+    shot t2 = { orientation, t2_pos, team };
+    shot t3 = { orientation, t3_pos, team };
+    shot t4 = { orientation, t4_pos, team };
     shots.emplace_back(t1);
     shots.emplace_back(t2);
     shots.emplace_back(t3);
     shots.emplace_back(t4);
 }
 
-void UpdateEnemies(vector<Bot>& enemies, vector<shot>& shots, Player player, vector<Explosion>& explosions, int step, int& targetID, float vel) {
+void UpdateEnemies(vector<Bot>& enemies, const vector<Bot>& allies, vector<shot>& shots, const Player& player, vector<Explosion>& explosions, int step, int& playerTargetID, float vel) {
     float dt = GetFrameTime();
-    for (size_t i = 0; i < enemies.size(); i++) {
-        if (!enemies[i].alive) continue;
-        Vector3 upVector = { 0.0f, 1.0f, 0.0f };
-        Vector3 forward1 = { 0.0f, 0.0f, -1.0f };
-        Vector3 direction = Vector3RotateByQuaternion(forward1, player.orientation);
-        Vector3 targetPos = Vector3Add(player.pos, Vector3Scale(direction, 30.0f));
-        Matrix lookAt = MatrixLookAt(enemies[i].pos, targetPos, upVector);
-        lookAt = MatrixInvert(lookAt);
-        Matrix lookAtPlayer = MatrixLookAt(enemies[i].pos, player.pos, upVector);
-        lookAtPlayer = MatrixInvert(lookAtPlayer);
-        enemies[i].orientation = QuaternionFromMatrix(lookAtPlayer);
-        Vector3 forward = { 0.0f, 0.0f, -1.0f };
-        forward = Vector3RotateByQuaternion(forward, QuaternionFromMatrix(lookAt));
-        enemies[i].pos = Vector3Add(enemies[i].pos, Vector3Scale(forward, vel * dt));
 
-        float range = 20.0f;
-        float rangeSqr = range * range;
-        float pushSpeed = 5.0f;
+    for (int i = 0; i < (int)enemies.size(); ++i) {
+        if (!enemies[i].alive) continue;
+
+        // wybór celu
+        bool needPick = false;
+
+        if (enemies[i].targetID == TARGET_NONE) {
+            needPick = true;
+        }
+        else if (enemies[i].targetID == TARGET_PLAYER) {
+            if (Vector3Distance(enemies[i].pos, player.pos) < MIN_LOCK_DISTANCE)
+                needPick = true;
+        }
+        else {
+            int tid = enemies[i].targetID;
+
+            if (tid < 0 || tid >= (int)allies.size() || !allies[tid].alive)
+                needPick = true;
+            else if (Vector3Distance(enemies[i].pos, allies[tid].pos) < MIN_LOCK_DISTANCE)
+                needPick = true;
+        }
+
+        if (needPick)
+            enemies[i].targetID = PickTargetForEnemy(enemies[i], player, allies);
+
+        Vector3 targetPos = enemies[i].pos;
+        Quaternion targetOrientation = QuaternionIdentity();
+        bool hasTarget = false;
+
+        if (enemies[i].targetID == TARGET_PLAYER) {
+            targetPos = player.pos;
+            targetOrientation = player.orientation;
+            hasTarget = true;
+        }
+        else if (enemies[i].targetID >= 0 && enemies[i].targetID < (int)allies.size()) {
+            targetPos = allies[enemies[i].targetID].pos;
+            targetOrientation = allies[enemies[i].targetID].orientation;
+            hasTarget = true;
+        }
+
+        // separation
         Vector3 separation = { 0.0f, 0.0f, 0.0f };
-        for (int j = 0; j < enemies.size(); j++) {
+
+        for (int j = 0; j < (int)enemies.size(); ++j) {
             if (i == j) continue;
-            Vector3 toTarget = Vector3Subtract(enemies[i].pos, enemies[j].pos);
-            float distSqr = Vector3LengthSqr(toTarget);
-            if (distSqr < rangeSqr && distSqr > 0.001f) {
-                float dist = sqrtf(distSqr);
-                Vector3 direction = Vector3Scale(toTarget, 1.0f / dist);
-                float strength = (range - dist) / range;
-                separation = Vector3Add(separation, Vector3Scale(direction, strength * pushSpeed * dt));
+            if (!enemies[j].alive) continue;
+
+            Vector3 toOther = Vector3Subtract(enemies[i].pos, enemies[j].pos);
+            float dist = Vector3Length(toOther);
+
+            if (dist > 0.001f && dist < SEPARATION_RANGE) {
+                Vector3 dir = Vector3Scale(toOther, 1.0f / dist);
+                float factor = (SEPARATION_RANGE - dist) / SEPARATION_RANGE;
+                separation = Vector3Add(separation, Vector3Scale(dir, factor * SEPARATION_STRENGTH));
             }
         }
-        enemies[i].pos = Vector3Add(enemies[i].pos, separation);
 
-        for (size_t j = 0; j < shots.size(); j++) {
+        for (int j = 0; j < (int)allies.size(); ++j) {
+            if (!allies[j].alive) continue;
+
+            Vector3 toOther = Vector3Subtract(enemies[i].pos, allies[j].pos);
+            float dist = Vector3Length(toOther);
+
+            if (dist > 0.001f && dist < SEPARATION_RANGE) {
+                Vector3 dir = Vector3Scale(toOther, 1.0f / dist);
+                float factor = (SEPARATION_RANGE - dist) / SEPARATION_RANGE;
+                separation = Vector3Add(separation, Vector3Scale(dir, factor * (SEPARATION_STRENGTH * 0.8f)));
+            }
+        }
+
+        if (hasTarget) {
+            Vector3 toTarget = Vector3Subtract(targetPos, enemies[i].pos);
+            float distToTarget = Vector3Length(toTarget);
+
+            // strzelanie z wyprzedzeniem
+            float bulletSpeed = 240.0f;
+
+            Vector3 targetForward = { 0.0f, 0.0f, 1.0f };
+            targetForward = Vector3RotateByQuaternion(targetForward, targetOrientation);
+
+            Vector3 targetVelocity = Vector3Scale(targetForward, 30.0f);
+            float timeToTarget = distToTarget / bulletSpeed;
+
+            Vector3 predictedPos = Vector3Add(targetPos, Vector3Scale(targetVelocity, timeToTarget));
+            Vector3 shootDir = Vector3Subtract(predictedPos, enemies[i].pos);
+
+            if (Vector3Length(shootDir) > 0.001f) {
+                shootDir = Vector3Normalize(shootDir);
+
+                Matrix shootLookAt = MatrixLookAt(enemies[i].pos, Vector3Add(enemies[i].pos, shootDir), Vector3{ 0.0f, 1.0f, 0.0f });
+                shootLookAt = MatrixInvert(shootLookAt);
+
+                Quaternion shootOrientation = QuaternionFromMatrix(shootLookAt);
+
+                if (GetRandomValue(0, 100) > 99)
+                    Shot(shots, enemies[i].pos, shootOrientation, shot_e);
+            }
+
+            if (distToTarget < TARGET_STOP_DISTANCE) {
+                if (Vector3Length(separation) > 0.001f) {
+                    Vector3 move = Vector3Normalize(separation);
+                    enemies[i].pos = Vector3Add(enemies[i].pos, Vector3Scale(move, vel * 0.4f * dt));
+
+                    Vector3 lookPos = Vector3Add(enemies[i].pos, move);
+                    Matrix lookAt = MatrixLookAt(enemies[i].pos, lookPos, Vector3{ 0,1,0 });
+                    lookAt = MatrixInvert(lookAt);
+
+                    Quaternion desired = QuaternionFromMatrix(lookAt);
+                    enemies[i].orientation = QuaternionSlerp(enemies[i].orientation, desired, fminf(1.0f, ENEMY_ROT_SPEED * dt));
+                    enemies[i].orientation = QuaternionNormalize(enemies[i].orientation);
+                }
+
+                continue;
+            }
+
+            Vector3 desiredDir = Vector3Normalize(toTarget);
+
+            Vector3 sepDir = separation;
+            if (Vector3Length(sepDir) > 0.001f)
+                sepDir = Vector3Normalize(sepDir);
+
+            Vector3 combined = Vector3Add(desiredDir, Vector3Scale(sepDir, SEPARATION_WEIGHT));
+
+            if (Vector3Length(combined) < 0.001f)
+                combined = desiredDir;
+
+            combined = Vector3Normalize(combined);
+
+            // ograniczenie bocznego skrętu
+            combined.x *= 0.35f;
+            combined = Vector3Normalize(combined);
+
+            Vector3 lookPos = Vector3Add(enemies[i].pos, combined);
+            Matrix lookAt = MatrixLookAt(enemies[i].pos, lookPos, Vector3{ 0,1,0 });
+            lookAt = MatrixInvert(lookAt);
+
+            Quaternion desired = QuaternionFromMatrix(lookAt);
+
+            enemies[i].orientation = QuaternionSlerp(enemies[i].orientation, desired, fminf(1.0f, ENEMY_ROT_SPEED * dt));
+            enemies[i].orientation = QuaternionNormalize(enemies[i].orientation);
+
+            Vector3 forward = { 0.0f, 0.0f, -1.0f };
+            forward = Vector3RotateByQuaternion(forward, enemies[i].orientation);
+
+            Vector3 moveVec = Vector3Scale(forward, vel);
+            moveVec = Vector3Add(moveVec, Vector3Scale(separation, vel * 0.03f));
+
+            enemies[i].pos = Vector3Add(enemies[i].pos, Vector3Scale(moveVec, dt));
+        }
+        else {
+            Vector3 forward = { 0.0f, 0.0f, -1.0f };
+            forward = Vector3RotateByQuaternion(forward, enemies[i].orientation);
+
+            Vector3 move = Vector3Add(Vector3Scale(forward, vel * 0.3f), Vector3Scale(separation, 0.5f));
+
+            if (Vector3Length(move) > 0.001f) {
+                enemies[i].pos = Vector3Add(enemies[i].pos, Vector3Scale(Vector3Normalize(move), vel * 0.3f * dt));
+
+                Vector3 lookPos = Vector3Add(enemies[i].pos, move);
+                Matrix lookAt = MatrixLookAt(enemies[i].pos, lookPos, Vector3{ 0,1,0 });
+                lookAt = MatrixInvert(lookAt);
+
+                Quaternion desired = QuaternionFromMatrix(lookAt);
+                enemies[i].orientation = QuaternionSlerp(enemies[i].orientation, desired, fminf(1.0f, ENEMY_ROT_SPEED * dt));
+                enemies[i].orientation = QuaternionNormalize(enemies[i].orientation);
+            }
+        }
+
+        // trafienia strzałami
+        for (int j = 0; j < (int)shots.size(); ++j) {
+            if (shots[j].team == shot_e) continue;
+
             float dist = Vector3Distance(shots[j].pos, enemies[i].pos);
+
             if (dist < enemies[i].radius) {
                 enemies[i].HP -= 200;
-                if (enemies[i].HP < 0) {
+
+                if (enemies[i].HP <= 0) {
                     enemies[i].alive = false;
+
                     shots.erase(shots.begin() + j);
+
                     Explosion t = { enemies[i].pos, step };
                     explosions.push_back(t);
-                    if (targetID == i) targetID = -1;
+
+                    if (playerTargetID == i)
+                        playerTargetID = -1;
+
                     enemies.erase(enemies.begin() + i);
+                    --i;
                     break;
+                }
+                else {
+                    shots.erase(shots.begin() + j);
+                    --j;
                 }
             }
         }
     }
 }
+
+
+void UpdateAllies(vector<Bot>& allies, const vector<Bot>& enemies, vector<shot>& shots, vector<Explosion>& explosions, int step, float vel) {
+    float dt = GetFrameTime();
+    Quaternion modelCorrection = QuaternionFromAxisAngle(Vector3{ 0.0f, 1.0f, 0.0f }, MODEL_CORRECTION_Y_ANGLE);
+
+    for (int i = 0; i < (int)allies.size(); ++i) {
+        if (!allies[i].alive) continue;
+
+        int bestId = TARGET_NONE;
+        float bestDist = 1e30f;
+
+        for (int e = 0; e < (int)enemies.size(); ++e) {
+            if (!enemies[e].alive) continue;
+
+            float d = Vector3Distance(allies[i].pos, enemies[e].pos);
+
+            if (d < MIN_LOCK_DISTANCE) continue;
+
+            if (d < bestDist) {
+                bestDist = d;
+                bestId = e;
+            }
+        }
+
+        allies[i].targetID = bestId;
+
+        Vector3 separation = { 0,0,0 };
+
+        for (int j = 0; j < (int)allies.size(); ++j) {
+            if (i == j) continue;
+            if (!allies[j].alive) continue;
+
+            Vector3 toOther = Vector3Subtract(allies[i].pos, allies[j].pos);
+            float dist = Vector3Length(toOther);
+
+            if (dist > 0.001f && dist < SEPARATION_RANGE) {
+                Vector3 dir = Vector3Scale(toOther, 1.0f / dist);
+                float factor = (SEPARATION_RANGE - dist) / SEPARATION_RANGE;
+                separation = Vector3Add(separation, Vector3Scale(dir, factor * SEPARATION_STRENGTH));
+            }
+        }
+
+        for (int j = 0; j < (int)enemies.size(); ++j) {
+            if (!enemies[j].alive) continue;
+
+            Vector3 toOther = Vector3Subtract(allies[i].pos, enemies[j].pos);
+            float dist = Vector3Length(toOther);
+
+            if (dist > 0.001f && dist < SEPARATION_RANGE) {
+                Vector3 dir = Vector3Scale(toOther, 1.0f / dist);
+                float factor = (SEPARATION_RANGE - dist) / SEPARATION_RANGE;
+                separation = Vector3Add(separation, Vector3Scale(dir, factor * (SEPARATION_STRENGTH * 0.6f)));
+            }
+        }
+
+        if (allies[i].targetID == TARGET_NONE) {
+            if (Vector3Length(separation) > 0.001f) {
+                Vector3 move = Vector3Scale(Vector3Normalize(separation), vel * 0.4f * dt);
+                allies[i].pos = Vector3Add(allies[i].pos, move);
+
+                Matrix lookAt = MatrixLookAt(allies[i].pos, Vector3Add(allies[i].pos, move), Vector3{ 0,1,0 });
+                lookAt = MatrixInvert(lookAt);
+
+                Quaternion desired = QuaternionFromMatrix(lookAt);
+                desired = QuaternionMultiply(desired, modelCorrection);
+
+                allies[i].orientation = QuaternionSlerp(allies[i].orientation, desired, fminf(1.0f, ALLY_ROT_SPEED * dt));
+                allies[i].orientation = QuaternionNormalize(allies[i].orientation);
+            }
+
+            continue;
+        }
+
+        int targetID = allies[i].targetID;
+
+        if (targetID < 0 || targetID >= (int)enemies.size() || !enemies[targetID].alive) {
+            continue;
+        }
+
+        Vector3 targetPos = enemies[targetID].pos;
+        Vector3 toTarget = Vector3Subtract(targetPos, allies[i].pos);
+        float distToTarget = Vector3Length(toTarget);
+
+        // strzelanie do aktualnej pozycji przeciwnika
+        if (GetRandomValue(0, 100) > 98) {
+            Vector3 shootDir = Vector3Subtract(enemies[targetID].pos, allies[i].pos);
+
+            if (Vector3Length(shootDir) > 0.001f) {
+                shootDir = Vector3Normalize(shootDir);
+
+                Matrix shootLookAt = MatrixLookAt(allies[i].pos, Vector3Add(allies[i].pos, shootDir), Vector3{ 0.0f, 1.0f, 0.0f });
+                shootLookAt = MatrixInvert(shootLookAt);
+
+                Quaternion shootOrientation = QuaternionFromMatrix(shootLookAt);
+
+                Shot(shots, allies[i].pos, shootOrientation, shot_a);
+            }
+        }
+
+        if (distToTarget < TARGET_STOP_DISTANCE) {
+            if (Vector3Length(separation) > 0.001f) {
+                Vector3 move = Vector3Scale(Vector3Normalize(separation), vel * 0.4f * dt);
+                allies[i].pos = Vector3Add(allies[i].pos, move);
+
+                Matrix lookAt = MatrixLookAt(allies[i].pos, Vector3Add(allies[i].pos, move), Vector3{ 0,1,0 });
+                lookAt = MatrixInvert(lookAt);
+
+                Quaternion desired = QuaternionFromMatrix(lookAt);
+                desired = QuaternionMultiply(desired, modelCorrection);
+
+                allies[i].orientation = QuaternionSlerp(allies[i].orientation, desired, fminf(1.0f, ALLY_ROT_SPEED * dt));
+                allies[i].orientation = QuaternionNormalize(allies[i].orientation);
+            }
+
+            continue;
+        }
+
+        Vector3 desiredDir = Vector3Normalize(toTarget);
+
+        Vector3 sepDir = separation;
+
+        if (Vector3Length(sepDir) > 0.001f)
+            sepDir = Vector3Normalize(sepDir);
+
+        Vector3 combined = Vector3Add(desiredDir, Vector3Scale(sepDir, SEPARATION_WEIGHT));
+
+        if (Vector3Length(combined) < 0.001f)
+            combined = desiredDir;
+
+        combined = Vector3Normalize(combined);
+
+        // ograniczenie bocznego skrętu
+        combined.x *= 0.35f;
+        combined = Vector3Normalize(combined);
+
+        Vector3 lookPos = Vector3Add(allies[i].pos, combined);
+        Matrix lookAt = MatrixLookAt(allies[i].pos, lookPos, Vector3{ 0,1,0 });
+        lookAt = MatrixInvert(lookAt);
+
+        Quaternion desired = QuaternionFromMatrix(lookAt);
+        desired = QuaternionMultiply(desired, modelCorrection);
+
+        allies[i].orientation = QuaternionSlerp(allies[i].orientation, desired, fminf(1.0f, ALLY_ROT_SPEED * dt));
+        allies[i].orientation = QuaternionNormalize(allies[i].orientation);
+
+        Vector3 forward = { 0.0f, 0.0f, 1.0f };
+        forward = Vector3RotateByQuaternion(forward, allies[i].orientation);
+
+        Vector3 moveVec = Vector3Scale(forward, vel);
+        moveVec = Vector3Add(moveVec, Vector3Scale(separation, vel * 0.03f));
+
+        allies[i].pos = Vector3Add(allies[i].pos, Vector3Scale(moveVec, dt));
+
+        // reakcja na strzały
+        for (int j = 0; j < (int)shots.size(); ++j) {
+            if (shots[j].team == shot_a) continue;
+
+            float dist = Vector3Distance(shots[j].pos, allies[i].pos);
+
+            if (dist < allies[i].radius) {
+                allies[i].HP -= 200;
+
+                if (allies[i].HP <= 0) {
+                    allies[i].alive = false;
+                    shots.erase(shots.begin() + j);
+
+                    Explosion t = { allies[i].pos, step };
+                    explosions.push_back(t);
+                    break;
+                }
+                else {
+                    shots.erase(shots.begin() + j);
+                    --j;
+                }
+            }
+        }
+    }
+}
+
 
 void UpdateExplosions(vector<Explosion>& explosions, int step, Model& model) {
     // Czas trwania wybuchu: 45 klatek (niecała sekunda przy 60 FPS)
@@ -356,18 +750,35 @@ void UpdateExplosions(vector<Explosion>& explosions, int step, Model& model) {
     }
 }
 
-void DrawEnemies(vector<Bot> enemies, Model model, float scale) {
-    for (const auto& e : enemies) {
-        if (!e.alive) continue;
+void DrawEnemies(vector<Bot> enemies, Model model, float scale, Shader shader, int targetID) {
+    for (int i = 0; i < enemies.size(); i++) {
+        if (!enemies[i].alive) continue;
 
         Vector3 axis;
         float angle;
-        QuaternionToAxisAngle(e.orientation, &axis, &angle);
+        QuaternionToAxisAngle(enemies[i].orientation, &axis, &angle);
         angle *= RAD2DEG;
 
-        DrawModelEx(model, e.pos, axis, angle, Vector3{ scale, scale, scale }, WHITE);
+        DrawModelEx(model, enemies[i].pos, axis, angle, Vector3{scale, scale, scale}, WHITE);
         //DrawSphere(e.pos, e.radius, GREEN);
-        DrawCubeWires(e.pos, e.radius * 2, e.radius * 2, e.radius * 2, RED);
+        if (i == targetID) {
+            EndShaderMode();
+            DrawCubeWires(enemies[i].pos, enemies[i].radius * 2, enemies[i].radius * 2, enemies[i].radius * 2, RED);
+            BeginShaderMode(shader);
+        }
+    }
+}
+void DrawAllies(vector<Bot> allies, Model model, float scale, Shader shader) {
+    for (int i = 0; i < allies.size(); i++) {
+        if (!allies[i].alive) continue;
+
+        Vector3 axis;
+        float angle;
+        QuaternionToAxisAngle(allies[i].orientation, &axis, &angle);
+        angle *= RAD2DEG;
+
+        DrawModelEx(model, allies[i].pos, axis, angle, Vector3{ scale, scale, scale }, WHITE);
+        //DrawSphere(e.pos, e.radius, GREEN);
     }
 }
 
@@ -383,6 +794,7 @@ float zoomFun(float x) {
 }
 
 int main() {
+    #pragma region Init
     int GameState = 0; // 0 - loading, 1 - press to start, 2 - playing
 
     const int screenWidth = 1280;
@@ -402,10 +814,10 @@ int main() {
     player.pos = { 0.0f, 0.0f, 0.0f };
     player.orientation = QuaternionIdentity();
 
-    float a = 20.0f;
+    float a = 30.0f;
     float speed = a;
     float BotSpeed = a;
-    float ShotVel = 2 * a;
+    float ShotVel = 8 * a;
 
     Model xWing;
     Model xWingFPV;
@@ -469,18 +881,32 @@ int main() {
     UnloadImage(glowImg);
 
     vector<shot> shots;
-    vector<Bot> bots;
+    vector<Bot> enemies;
+    vector<Bot> allies;
     vector<Explosion> explosions;
     int NoE = 10; // number of enemies
+    int NoA = 10; // number of allies
+    float radius = 30.0f;
 
     for (int i = 0; i < NoE; i++) {
         Bot t;
         t.pos = { (float)GetRandomValue(-200, 200), (float)GetRandomValue(-200, 200), (float)GetRandomValue(300, 800) };
         t.orientation = QuaternionIdentity();
         t.alive = true;
-        t.radius = 5.0f;
+        t.radius = 30.0f;
         t.HP = 1000;
-        bots.push_back(t);
+        t.targetID = -1;
+        enemies.push_back(t);
+    }
+    for (int i = 0; i < NoA; i++) {
+        Bot t;
+        t.pos = { (float)GetRandomValue(-200, 200), (float)GetRandomValue(-200, 200), (float)GetRandomValue(300, 800) };
+        t.orientation = QuaternionIdentity();
+        t.alive = true;
+        t.radius = 30.0f;
+        t.HP = 1000;
+        t.targetID = -1;
+        allies.push_back(t);
     }
 
     float step = 0.0;
@@ -497,10 +923,16 @@ int main() {
     bool zoom = false;
     int magazine = 300;
 
+    bool turbo = false;
+    float ToT = 3.0f; // Time of Turbo
+
     bool assetsLoaded = false;
     RenderTexture2D menuTarget = LoadRenderTexture(screenSize.x, screenSize.y);
     bool out = false;
     Light light;
+
+    player.HP = 10000.0f;
+    #pragma endregion
 
     while (!WindowShouldClose()) {
         if (GameState >= 0 && GameState <= 3 && step > 1) {
@@ -746,21 +1178,32 @@ int main() {
             targetPitch = 1.0 * t2 * (GetMousePosition().y - screenSize.y / 2.0) / screenSize.y;
 
             if (IsKeyPressed(KEY_F)) {
-                targetID = targetLockingPlayer(player, bots);
+                targetID = targetLockingAlliesPlayer(player, enemies);
                 if (toggleLock) targetID = -1;
                 toggleLock = !toggleLock;
             }
 
+            targetYaw = 0.0f; // reset automatycznego yaw każdej klatki, zapobiega akumulacji
             if (toggleLock && targetID != -1) {
-                targetRoll += 1.5f * t2 * (GetWorldToScreen(bots[targetID].pos, camera).x - screenSize.x / 2.0) / screenSize.x;
-                targetPitch = 1.0 * t2 * (GetWorldToScreen(bots[targetID].pos, camera).y - screenSize.y / 2.0) / screenSize.y;
-                if (abs((GetWorldToScreen(bots[targetID].pos, camera).x - screenSize.x / 2.0) / screenSize.x) < 0.1f)
-                    targetYaw = -1.5f * t2 * (GetWorldToScreen(bots[targetID].pos, camera).x - screenSize.x / 2.0) / screenSize.x;
+                targetRoll += 1.5f * t2 * (GetWorldToScreen(enemies[targetID].pos, camera).x - screenSize.x / 2.0f) / screenSize.x;
+                targetPitch = 1.0f * t2 * (GetWorldToScreen(enemies[targetID].pos, camera).y - screenSize.y / 2.0f) / screenSize.y;
+                float screenXNorm = (GetWorldToScreen(enemies[targetID].pos, camera).x - screenSize.x / 2.0f) / screenSize.x;
+                if (fabs(screenXNorm) < 0.1f) {
+                    targetYaw = -1.5f * t2 * screenXNorm;
+                    // clamp yaw na bezpieczny zakres (dostosuj, jeśli potrzebujesz)
+                    const float MAX_AUTO_YAW = 10.0f;
+                    if (targetYaw > MAX_AUTO_YAW) targetYaw = MAX_AUTO_YAW;
+                    if (targetYaw < -MAX_AUTO_YAW) targetYaw = -MAX_AUTO_YAW;
+                }
+                else {
+                    targetYaw = 0.0f;
+                }
 
                 player.targetOrientation = { targetPitch, targetYaw, targetRoll };
             }
             else {
-                player.targetOrientation = { targetPitch, targetYaw, targetRoll };
+                // bez locka nie ma auto-yaw
+                player.targetOrientation = { targetPitch, 0.0f, targetRoll };
             }
 
             if (IsKeyPressed(KEY_ONE)) camState = 1;
@@ -782,9 +1225,20 @@ int main() {
                 ToggleFullscreen();
             }
 
+            if (ToT >= 0.0f && turbo) {
+                ToT -= dt;
+                a = 3;
+            }
+            else
+                a = 1;
+            if (IsKeyPressed(KEY_LEFT_ALT)) {
+                turbo = !turbo;
+                if (!turbo) ToT = 3.0f;
+            }
+
             if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && ToR <= 0.0f) {
                 if (magazine >= 4) {
-                    Shot(shots, player);
+                    Shot(shots, player.pos, player.orientation, shot_p);
                     if (isAudioReady) {
                         PlaySound(laserChannels[currentChannel]);
                         currentChannel++;
@@ -794,9 +1248,10 @@ int main() {
                 }
             }
 
-            UpdateFlight(player, speed);
+            UpdateFlight(player, a * speed, shots, 15.0f);
             UpdateShots(shots, ShotVel);
-            UpdateEnemies(bots, shots, player, explosions, step, targetID, speed * 0.8);
+            UpdateEnemies(enemies, allies, shots, player, explosions, step, targetID, speed);
+            UpdateAllies(allies, enemies, shots, explosions, step, speed);
 
             Vector3 rotationAxis;
             float rotationAngle;
@@ -851,9 +1306,16 @@ int main() {
             BeginShaderMode(lightingShader);
 
             UpdateExplosions(explosions, step, ExplosionModel);
-            DrawEnemies(bots, TIE, scale);
+            DrawEnemies(enemies, TIE, scale, lightingShader, targetID);
+            DrawAllies(allies, xWing, scale, lightingShader);
 
-            DrawShots(shots);
+            EndShaderMode();
+            rlDisableDepthTest();
+            rlDisableDepthMask();
+            DrawShots(shots, player);
+            rlEnableDepthMask();
+            rlEnableDepthTest();
+            BeginShaderMode(lightingShader);
 
             if (camState == 3) DrawModelEx(xWing, player.pos, rotationAxis, rotationAngle, Vector3{ scale, scale, scale }, WHITE);
             else if (camState == 2) DrawModelEx(xWing, player.pos, rotationAxis, rotationAngle, Vector3{ scale, scale, scale }, WHITE);
@@ -861,23 +1323,20 @@ int main() {
 
             EndMode3D();
 
-            // Wyświetlanie HUD-a
-            //DrawText("SYSTEMY NAWIGACJI I RENDEROWANIA AKTYWNE", 10, 10, 20, GREEN);
-            //DrawText("Sterowanie: W/S (Pitch) | A/D (Roll) | Q/E (Yaw)", 10, 40, 20, LIGHTGRAY);
-            //DrawText(TextFormat("Rotation: X: %.1f, Y: %.1f, Z: %.1f", player.orientation.x, player.orientation.y, player.orientation.z), 10, 70, 20, WHITE);
-            DrawText(TextFormat("Enemies left: %.1f", (float)bots.size()), 10, 70, 20, WHITE);
             EndShaderMode();
+            DrawText(TextFormat("Enemies left: %.1f", (float)enemies.size()), 10, 70, 20, WHITE);
+            DrawText(TextFormat("Allies left: %.1f", (float)allies.size()), 10, 90, 20, WHITE);
+            DrawText(TextFormat("Time of turbo left: %.1f", ToT), 10, 110, 20, WHITE);
+            DrawText(TextFormat("HP: %.1f", player.HP), 10, 130, 20, WHITE);
             if (camState != 2) Targeting(screenSize);
             BeginShaderMode(lightingShader);
 
             EndDrawing();
             step++;
-            targetRoll *= 0.99;
-            targetPitch *= 0.9;
-            targetYaw *= 0.4;
         }
     }
 
+    #pragma region Unload
     UnloadModel(xWing);
     UnloadModel(xWingFPV);
     UnloadModel(Tatooine);
@@ -895,5 +1354,6 @@ int main() {
     }
     CloseAudioDevice();
     CloseWindow();
+    #pragma endregion
     return 0;
 }
