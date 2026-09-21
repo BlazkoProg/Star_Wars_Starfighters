@@ -303,7 +303,7 @@ void DrawShots(const vector<shot>& shots, Player player) {
                 color = BLUE;
             else if (shots[i].team == shot_e)
                 color = RED;
-            DrawCapsule(startPos, endPos, 3.0f, 10, 1, color);
+            DrawCapsule(startPos, endPos, 1.0f, 10, 1, color);
         }
     }
 }
@@ -705,6 +705,7 @@ void UpdateAllies(vector<Bot>& allies, const vector<Bot>& enemies, vector<shot>&
 
                     Explosion t = { allies[i].pos, step };
                     explosions.push_back(t);
+                    allies.erase(allies.begin() + i);
                     break;
                 }
                 else {
@@ -893,7 +894,7 @@ int main() {
         t.pos = { (float)GetRandomValue(-200, 200), (float)GetRandomValue(-200, 200), (float)GetRandomValue(300, 800) };
         t.orientation = QuaternionIdentity();
         t.alive = true;
-        t.radius = 30.0f;
+        t.radius = radius;
         t.HP = 1000;
         t.targetID = -1;
         enemies.push_back(t);
@@ -903,7 +904,7 @@ int main() {
         t.pos = { (float)GetRandomValue(-200, 200), (float)GetRandomValue(-200, 200), (float)GetRandomValue(300, 800) };
         t.orientation = QuaternionIdentity();
         t.alive = true;
-        t.radius = 30.0f;
+        t.radius = radius;
         t.HP = 1000;
         t.targetID = -1;
         allies.push_back(t);
@@ -935,12 +936,16 @@ int main() {
     #pragma endregion
 
     while (!WindowShouldClose()) {
-        if (GameState >= 0 && GameState <= 3 && step > 1) {
-            UpdateMusicStream(musicIntro);
+
+        if (isAudioReady) {
+            if (GameState >= 0 && GameState <= 3 && step > 1) {
+                UpdateMusicStream(musicIntro);
+            }
+            else if (GameState == 4) {
+                UpdateMusicStream(music01);
+            }
         }
-        else if (GameState == 4) {
-            UpdateMusicStream(music01);
-        }
+
         if (GameState == 0) {
             // 1. Wyświetlamy ekran ładowania
             BeginDrawing();
@@ -1013,15 +1018,18 @@ int main() {
         else if (GameState == 1) {
             if (IsKeyPressed(KEY_TAB)) {
                 GameState = 4;
-                StopMusicStream(musicIntro);
-                PlayMusicStream(music01);
+
+                if (isAudioReady) {
+                    StopMusicStream(musicIntro);
+                    PlayMusicStream(music01);
+                }
             }
             BeginTextureMode(menuTarget);
             ClearBackground(BLANK);
 
             const char* menuText = "STAR WARS";
             float fontSize = 300.0f;
-            float spacing = 0.0f;
+            float spacing = 20.0f;
             Vector2 textSize = MeasureTextEx(JediFont, menuText, fontSize * zoomFun(ToI), spacing);
             Vector2 textPos = { (screenSize.x / 2.0f) - (textSize.x / 2.0f), (screenSize.y / 2.0f)  - (textSize.y / 2.0f) };
 
@@ -1056,9 +1064,9 @@ int main() {
             BeginTextureMode(menuTarget);
             ClearBackground(BLANK);
 
-            const char* menuText = "starfighters";
+            const char* menuText = "STARFiGHTERS";
             float fontSize = 300.0f;
-            float spacing = 0.0f;
+            float spacing = 20.0f;
             Vector2 textSize = MeasureTextEx(JediFont, menuText, fontSize * zoomFun(ToI), spacing);
             Vector2 textPos = { (screenSize.x / 2.0f) - (textSize.x / 2.0f), (screenSize.y / 2.0f) - (textSize.y / 2.0f) };
 
@@ -1132,8 +1140,12 @@ int main() {
                 }
                 if (ToI >= 300.0f) {
                     ToI = 0.0f;
-                    StopMusicStream(musicIntro);
-                    PlayMusicStream(music01);
+
+                    if (isAudioReady) {
+                        StopMusicStream(musicIntro);
+                        PlayMusicStream(music01);
+                    }
+
                     GameState = 4;
                 }
             }
@@ -1333,6 +1345,13 @@ int main() {
 
             EndDrawing();
             step++;
+
+            /*if (enemies.size() <= 0) {
+                GameState = 5;
+            }
+            if (player.HP <= 0) {
+                GameState = 6;
+            }*/
         }
     }
 
