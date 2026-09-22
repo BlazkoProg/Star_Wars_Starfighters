@@ -9,6 +9,7 @@ x64/
 *.ipdb
 *.ilk
 *.exe
+*.zip
 
 # Ignoruj ukryty folder konfiguracyjny VS
 .vs/

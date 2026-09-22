@@ -58,6 +58,12 @@ struct Explosion {
     int fstep;
 };
 
+struct rocket {
+    Quaternion direction;
+    Vector3 pos;
+    int targetID;
+};
+
 Quaternion RotateToTarget(Quaternion current, Quaternion target, float pitchSpeed, float rollSpeed, float dt) {
     Vector3 localPitchAxis = { 1.0f, 0.0f, 0.0f };
     Vector3 localYawAxis = { 0.0f, 1.0f, 0.0f };
@@ -174,9 +180,9 @@ int PickTargetForEnemy(const Bot& enemy, const Player& player, const vector<Bot>
     return bestId;
 }
 
-Quaternion QuaternionToTarget(Player& player, Vector3 targetPos) {
+Quaternion QuaternionToTarget(Vector3 pos, Vector3 targetPos) {
     Vector3 forward = { 0.0f, 0.0f, 1.0f };
-    Vector3 direction = Vector3Subtract(targetPos, player.pos);
+    Vector3 direction = Vector3Subtract(targetPos, pos);
     direction = Vector3Normalize(direction);
     return QuaternionFromVector3ToVector3(forward, direction);
 }
@@ -303,7 +309,7 @@ void DrawShots(const vector<shot>& shots, Player player) {
                 color = BLUE;
             else if (shots[i].team == shot_e)
                 color = RED;
-            DrawCapsule(startPos, endPos, 1.0f, 10, 1, color);
+            DrawCapsule(startPos, endPos, 0.2f, 10, 1, color);
         }
     }
 }
@@ -332,8 +338,64 @@ void Shot(vector<shot>& shots, Vector3 pos, Quaternion orientation, ShotTeam tea
     shots.emplace_back(t3);
     shots.emplace_back(t4);
 }
+void DrawRockets(vector<rocket> rockets, Player player, Model RocketModel) {
+    for (int i = 0; i < rockets.size(); i++) {
+        Vector3 axis;
+        float angle;
 
-void UpdateEnemies(vector<Bot>& enemies, const vector<Bot>& allies, vector<shot>& shots, const Player& player, vector<Explosion>& explosions, int step, int& playerTargetID, float vel) {
+        QuaternionToAxisAngle(rockets[i].direction, &axis, &angle);
+
+        DrawModelEx(
+            RocketModel,
+            rockets[i].pos,
+            axis,
+            angle * RAD2DEG,
+            { 0.01f, 0.01f, 0.01f },
+            WHITE
+        );
+    }
+}
+void Rocket(vector<rocket>& rockets, Player player, vector<Bot>& enemies, int targetID, float vel, int& NoR) {
+    if (IsKeyPressed(KEY_X) && targetID >= 0 && targetID < (int)enemies.size() && NoR > 0) {
+        rocket t;
+        t.direction = player.orientation;
+        t.pos = player.pos;
+        t.targetID = targetID;
+        rockets.push_back(t);
+        NoR--;
+    }
+    float dt = GetFrameTime();
+    float turnSpeed = 5.0f;
+    float t = 1.0f - expf(-turnSpeed * dt);
+    for (int i = 0; i < (int)rockets.size(); i++) {
+        int id = rockets[i].targetID;
+
+        if (id < 0 || id >= (int)enemies.size() || !enemies[id].alive) {
+            continue;
+        }
+
+        Quaternion targetRotation = QuaternionToTarget(
+            rockets[i].pos,
+            enemies[id].pos
+        );
+
+        rockets[i].direction = QuaternionSlerp(
+            rockets[i].direction,
+            targetRotation,
+            t
+        );
+
+        Vector3 forward = { 0.0f, 0.0f, 1.0f };
+        forward = Vector3RotateByQuaternion(forward, rockets[i].direction);
+
+        rockets[i].pos = Vector3Add(
+            rockets[i].pos,
+            Vector3Scale(forward, vel * dt)
+        );
+    }
+}
+
+void UpdateEnemies(vector<Bot>& enemies, const vector<Bot>& allies, vector<shot>& shots, vector<rocket>& rockets, const Player& player, vector<Explosion>& explosions, int step, int& playerTargetID, float vel) {
     float dt = GetFrameTime();
 
     for (int i = 0; i < (int)enemies.size(); ++i) {
@@ -530,6 +592,32 @@ void UpdateEnemies(vector<Bot>& enemies, const vector<Bot>& allies, vector<shot>
                 }
                 else {
                     shots.erase(shots.begin() + j);
+                    --j;
+                }
+            }
+        }
+        for (int j = 0; j < (int)rockets.size(); ++j) {
+            float dist = Vector3Distance(rockets[j].pos, enemies[i].pos);
+            if (dist < enemies[i].radius / 4) {
+                enemies[i].HP -= 1000;
+
+                if (enemies[i].HP <= 0) {
+                    enemies[i].alive = false;
+
+                    rockets.erase(rockets.begin() + j);
+
+                    Explosion t = { enemies[i].pos, step };
+                    explosions.push_back(t);
+
+                    if (playerTargetID == i)
+                        playerTargetID = -1;
+
+                    enemies.erase(enemies.begin() + i);
+                    --i;
+                    break;
+                }
+                else {
+                    rockets.erase(rockets.begin() + j);
                     --j;
                 }
             }
@@ -764,7 +852,7 @@ void DrawEnemies(vector<Bot> enemies, Model model, float scale, Shader shader, i
         //DrawSphere(e.pos, e.radius, GREEN);
         if (i == targetID) {
             EndShaderMode();
-            DrawCubeWires(enemies[i].pos, enemies[i].radius * 2, enemies[i].radius * 2, enemies[i].radius * 2, RED);
+            DrawCubeWires(enemies[i].pos, enemies[i].radius, enemies[i].radius, enemies[i].radius, RED); // "klatka" 2 razy mniejsza niz promien
             BeginShaderMode(shader);
         }
     }
@@ -824,6 +912,7 @@ int main() {
     Model xWingFPV;
     Model TIE;
     Model ExplosionModel;
+    Model RocketModel;
 
     Model Death_Star;
     Model Destroyer;
@@ -882,6 +971,7 @@ int main() {
     UnloadImage(glowImg);
 
     vector<shot> shots;
+    vector<rocket> rockets;
     vector<Bot> enemies;
     vector<Bot> allies;
     vector<Explosion> explosions;
@@ -926,6 +1016,7 @@ int main() {
 
     bool turbo = false;
     float ToT = 3.0f; // Time of Turbo
+    int NoR = 3; // number of rockets
 
     bool assetsLoaded = false;
     RenderTexture2D menuTarget = LoadRenderTexture(screenSize.x, screenSize.y);
@@ -958,6 +1049,7 @@ int main() {
             xWingFPV =          LoadModel("resources/models/xwing.glb");
             TIE =               LoadModel("resources/models/tie_fighter.glb");
             ExplosionModel =    LoadModel("resources/models/TIE_explosion.glb");
+            RocketModel =       LoadModel("resources/models/rocket.glb");
 
             Death_Star =    LoadModel("resources/models/death_star.glb");
             Destroyer =     LoadModel("resources/models/destroyer.glb");
@@ -1262,7 +1354,8 @@ int main() {
 
             UpdateFlight(player, a * speed, shots, 15.0f);
             UpdateShots(shots, ShotVel);
-            UpdateEnemies(enemies, allies, shots, player, explosions, step, targetID, speed);
+            Rocket(rockets, player, enemies, targetID, ShotVel, NoR);
+            UpdateEnemies(enemies, allies, shots, rockets, player, explosions, step, targetID, speed);
             UpdateAllies(allies, enemies, shots, explosions, step, speed);
 
             Vector3 rotationAxis;
@@ -1320,6 +1413,7 @@ int main() {
             UpdateExplosions(explosions, step, ExplosionModel);
             DrawEnemies(enemies, TIE, scale, lightingShader, targetID);
             DrawAllies(allies, xWing, scale, lightingShader);
+            DrawRockets(rockets, player, RocketModel);
 
             EndShaderMode();
             rlDisableDepthTest();
