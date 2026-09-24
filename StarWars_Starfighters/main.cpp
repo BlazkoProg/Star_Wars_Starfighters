@@ -1193,11 +1193,11 @@ int main() {
             BeginTextureMode(menuTarget);
             ClearBackground(BLANK);
 
-            const char* menuText = "press any button\nto start";
+            const char* menuText = "select game mode:";
             float fontSize = 150.0f;
             float spacing = 0.0f;
             Vector2 textSize = MeasureTextEx(JediFont, menuText, fontSize * 2.0f / PI * atan(step / 100.0f), spacing);
-            Vector2 textPos = { (screenSize.x / 2.0f) - (textSize.x / 2.0f), (screenSize.y / 2.0f) - (textSize.y / 2.0f) };
+            Vector2 textPos = { (screenSize.x / 2.0f) - (textSize.x / 2.0f), (screenSize.y / 4.0f) - (textSize.y / 2.0f) };
 
             DrawTextEx(JediFont, menuText, textPos, fontSize * 2.0f / PI * atan(step / 100.0f), spacing, YELLOW);
             EndTextureMode();
